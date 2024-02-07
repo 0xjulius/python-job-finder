@@ -2,7 +2,7 @@ from bs4 import BeautifulSoup
 from typing import Final
 import requests
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 import logging
 from dotenv import load_dotenv  # Import load_dotenv
 import os  # Import os module
@@ -14,23 +14,29 @@ load_dotenv()
 TOKEN: Final = os.getenv('TOKEN')
 BOT_USERNAME: Final = '@tyonhaku_bot'
 
-# Command Handlers
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Moi, Tervetuloa bottiin. Oletko valmis hakemaan töitä?")
+    message_text = "Moi, Tervetuloa bottiin. Valitse kaupunki, josta haluat etsiä IT-työpaikkoja:\n" \
+                   "1. Vaasa\n" \
+                   "2. Tampere\n" \
+                   "3. Helsinki\n"\
+                   "4. Koko Suomi"
+    await update.message.reply_text(message_text)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Olen työhakubotti, kirjoita jotain, jotta voin vastata Sinulle!")
 
-# Response Handler
-def handle_response(update: Update, text: str) -> str:
+async def handle_response(update: Update, text: str) -> str:
     processed: str = text.lower()
 
     if 'kyllä' in processed:
         return "Tässä on lista viimeisimmistä IT-työpaikoista:"
     elif 'en' in processed:
         return "Niin arvelinkin."
+    elif processed in ['1', '2', '3', '4']:
+        city = await get_city(processed)
+        await scrape_and_send_jobs(update, city)
     else:
-        return "En ymmärrä. Vastaa kyllä tai en."
+        return "En ymmärrä. Valitse yksi annetuista vaihtoehdoista."
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message_type: str = update.message.chat.type
@@ -41,25 +47,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if message_type == 'group':
         if BOT_USERNAME in text:
             new_text: str = text.replace(BOT_USERNAME, '').strip()
-            response: str = handle_response(update, new_text)  # Passing update to handle_response
+            response: str = await handle_response(update, new_text)  # Passing update to handle_response
             await update.message.reply_text(response)
             if 'kyllä' in new_text.lower():
                 await scrape_and_send_jobs(update)
         else:
             return
     else:
-        response: str = handle_response(update, text)  # Passing update to handle_response
+        response: str = await handle_response(update, text)  # Passing update to handle_response
         await update.message.reply_text(response)
         if 'kyllä' in text.lower():
             await scrape_and_send_jobs(update)
 
-# Scrape and Send Jobs
-async def scrape_and_send_jobs(update: Update):
-    await scrape_duunitori_jobs(update)
-    await scrape_monster_jobs(update)
+async def get_city(city_number: str) -> str:
+    cities = {
+        '1': 'vaasa',
+        '2': 'tampere',
+        '3': 'helsinki',
+        '4': 'koko Suomi'
+    }
+    return cities.get(city_number)
 
-async def scrape_duunitori_jobs(update: Update):
-    url = "https://duunitori.fi/tyopaikat?alue=vaasa&haku=it&order_by=date_posted"
+async def scrape_and_send_jobs(update: Update, city: str):
+    city_urls = {
+        'vaasa': "https://duunitori.fi/tyopaikat?alue=vaasa&haku=it&order_by=date_posted",
+        'tampere': "https://duunitori.fi/tyopaikat?alue=tampere&haku=it&order_by=date_posted",
+        'helsinki': "https://duunitori.fi/tyopaikat?alue=helsinki&haku=it&order_by=date_posted",
+        'koko Suomi': "https://duunitori.fi/tyopaikat?haku=it&order_by=date_posted"
+    }
+    await scrape_jobs(update, city_urls[city], city)
+
+async def scrape_jobs(update: Update, url: str, city: str):
     base_url = "https://duunitori.fi"
     company_name = "Duunitori.fi"
 
@@ -67,6 +85,11 @@ async def scrape_duunitori_jobs(update: Update):
     soup = BeautifulSoup(response.text, 'lxml')
     jobs = soup.find_all('div', class_='grid grid--middle job-box job-box--lg')
 
+    job_count = len(jobs)
+    message_header = f"Hakusi '{city.capitalize()}' IT-työpaikoista tuotti {job_count} tulosta.\n\n"
+
+    # Split message into chunks to avoid "Message is too long" error
+    message_chunks = [message_header]
     for job in jobs:
         company_name = job.find('h3', class_='job-box__title').text
         date = job.find('span', class_='job-box__job-posted').text
@@ -77,44 +100,18 @@ async def scrape_duunitori_jobs(update: Update):
             f"{company_name}\n"
             f"Työtehtävän nimi: {company_name}\n"
             f"Sijainti: {location.strip()} {date.strip()}\n"
-            f'Linkki: {job_url}'
+            f'Linkki: {job_url}\n\n'
         )
-        await update.message.reply_text(message)
+        # Check if adding the current job will exceed message length limit
+        if len(message_chunks[-1]) + len(message) > 4096:
+            message_chunks.append(message)
+        else:
+            message_chunks[-1] += message
 
-async def scrape_monster_jobs(update: Update):
-    url = "https://www.monster.fi/tyopaikat/it?search=&job_geo_location=Vaasa%2C+Suomi&radius=50&Etsi+ty%C3%B6paikkoja=Etsi+ty%C3%B6paikkoja&lat=63.09508899999999&lon=21.6164564&country=Suomi&administrative_area_level_1=undefined"
-    base_url = "https://monster.fi"
-    company_name = "Monster.fi"
+    # Send each chunk of the message separately
+    for chunk in message_chunks:
+        await update.message.reply_text(chunk)
 
-    response = requests.get(url)
-    soup = BeautifulSoup(response.text, 'lxml')
-    jobs = soup.find_all('div', class_='job__content clearfix')
-    available_jobs = soup.find('div', class_='recruiter-seo-search-content-header')
-    results = available_jobs.find('h1', class_='search-result-header').text
-
-    message = (
-        f"{company_name} - {results}\n"
-        "Listataan työpaikat..\n"
-    )
-    await update.message.reply_text(message)
-
-    for job in jobs:
-        actual_name = job.find('span', class_='recruiter-company-profile-job-organization').text
-        company_name = job.find('h2', class_='node__title').text
-        date = job.find('span', class_='date').text
-        location = job.find('div', class_='location').text
-        job_url = job.a['href']
-
-        message = (
-            f"{actual_name}\n"
-            f"Työpaikan nimi: {actual_name.strip()}\n"
-            f"Työtehtävän nimi: {company_name.strip()}\n"
-            f"Sijainti: {location.strip()} {date.strip()}\n"
-            f'Linkki: {job_url}'
-        )
-        await update.message.reply_text(message)
-
-# Error Handler
 async def error(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f'Update {update} caused error {context.error}')  # Corrected here
 
@@ -123,7 +120,6 @@ if __name__ == "__main__":
 
     app.add_handler(CommandHandler('start', start_command))
     app.add_handler(CommandHandler('help', help_command))
-
     app.add_handler(MessageHandler(filters.TEXT, handle_message))
 
     app.add_error_handler(error)
