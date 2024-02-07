@@ -22,3 +22,5 @@ To create your own script, you have to install:
 * pip install beautifulsoup4
 * pip install python-telegram-bot
 * pip install python-dotenv
+
+and create your own telegram-bot token
