@@ -1,11 +1,11 @@
 from bs4 import BeautifulSoup
 from typing import Final
 import requests
+import asyncio
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
-import logging
-from dotenv import load_dotenv  # Import load_dotenv
-import os  # Import os module
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+import os
+from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
@@ -70,10 +70,10 @@ async def get_city(city_number: str) -> str:
 
 async def scrape_and_send_jobs(update: Update, city: str):
     city_urls = {
-        'vaasa': "https://duunitori.fi/tyopaikat?alue=vaasa&haku=it&order_by=date_posted",
-        'tampere': "https://duunitori.fi/tyopaikat?alue=tampere&haku=it&order_by=date_posted",
-        'helsinki': "https://duunitori.fi/tyopaikat?alue=helsinki&haku=it&order_by=date_posted",
-        'koko Suomi': "https://duunitori.fi/tyopaikat?haku=it&order_by=date_posted"
+        'vaasa': "https://duunitori.fi/tyopaikat?haku=it-ala&alue=vaasa&filter_work_type=full_time&filter_work_relation=permanent",
+        'tampere': "https://duunitori.fi/tyopaikat?alue=tampere&haku=it-ala&filter_work_relation=permanent&filter_work_type=full_time",
+        'helsinki': "https://duunitori.fi/tyopaikat?alue=helsinki&haku=it-ala&filter_work_relation=permanent&filter_work_type=full_time",
+        'koko Suomi': "https://duunitori.fi/tyopaikat?haku=it-ala&filter_work_relation=permanent&filter_work_type=full_time"
     }
     await scrape_jobs(update, city_urls[city], city)
 
@@ -81,36 +81,44 @@ async def scrape_jobs(update: Update, url: str, city: str):
     base_url = "https://duunitori.fi"
     company_name = "Duunitori.fi"
 
-    response = requests.get(url)
-    soup = BeautifulSoup(response.text, 'lxml')
-    jobs = soup.find_all('div', class_='grid grid--middle job-box job-box--lg')
+    current_page = 1
+    max_pages = 3
 
-    job_count = len(jobs)
-    message_header = f"Hakusi '{city.capitalize()}' IT-työpaikoista tuotti {job_count} tulosta.\n\n"
+    while current_page <= max_pages:
+        response = requests.get(f"{url}&sivu={current_page}")
+        soup = BeautifulSoup(response.text, 'lxml')
+        jobs = soup.find_all('div', class_='grid grid--middle job-box job-box--lg')
 
-    # Split message into chunks to avoid "Message is too long" error
-    message_chunks = [message_header]
-    for job in jobs:
-        company_name = job.find('h3', class_='job-box__title').text
-        date = job.find('span', class_='job-box__job-posted').text
-        location = job.find('span', class_='job-box__job-location').text
-        job_url = base_url + job.a['href']
+        job_count = len(jobs)
+        message_header = f"Hakusi '{city.capitalize()}' IT-työpaikoista tuotti {job_count} tulosta.\n\n"
 
-        message = (
-            f"{company_name}\n"
-            f"Työtehtävän nimi: {company_name}\n"
-            f"Sijainti: {location.strip()} {date.strip()}\n"
-            f'Linkki: {job_url}\n\n'
-        )
-        # Check if adding the current job will exceed message length limit
-        if len(message_chunks[-1]) + len(message) > 4096:
-            message_chunks.append(message)
-        else:
-            message_chunks[-1] += message
+        # Split message into chunks to avoid "Message is too long" error
+        message_chunks = [message_header]
+        for job in jobs:
+            company_name = job.find('h3', class_='job-box__title').text
+            date = job.find('span', class_='job-box__job-posted').text
+            location = job.find('span', class_='job-box__job-location').text
+            job_url = base_url + job.a['href']
 
-    # Send each chunk of the message separately
-    for chunk in message_chunks:
-        await update.message.reply_text(chunk)
+            message = (
+                f"{company_name}\n"
+                f"Työtehtävän nimi: {company_name}\n"
+                f"Sijainti: {location.strip()} {date.strip()}\n"
+                f'Linkki: {job_url}\n\n'
+            )
+            # Check if adding the current job will exceed message length limit
+            if len(message_chunks[-1]) + len(message) > 4096:
+                message_chunks.append(message)
+            else:
+                message_chunks[-1] += message
+
+        # Send each chunk of the message separately
+        for chunk in message_chunks:
+            await update.message.reply_text(chunk)
+
+        current_page += 1
+
+        await asyncio.sleep(1)
 
 async def error(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f'Update {update} caused error {context.error}')  # Corrected here
